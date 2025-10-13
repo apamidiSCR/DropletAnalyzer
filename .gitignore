@@ -66,6 +66,9 @@ Thumbs.db
 *.bak
 *.backup
 
+# Data files
+DINJ_2_Test/
+
 # Keep these important directories and files:
 # - CMakeLists.txt files
 # - Source code (*.cpp, *.h, *.hpp)
