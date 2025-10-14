@@ -652,6 +652,12 @@ std::tuple<std::vector<cv::Vec3f>, std::vector<CircleResult>, std::vector<Drople
             return a.score > b.score;
         });
         
+        // Check if we have any valid candidates
+        if (candidates.empty()) {
+            std::cout << "Warning: No valid candidates found for circle " << (refinedCircles.size() + 1) << " (outer radius too small)" << std::endl;
+            continue; // Skip this circle
+        }
+        
         // Debug output: Show top candidates by penalized score with quadrant info
         std::cout << "Circle " << (refinedCircles.size() + 1) << " candidates (sorted by penalized score):" << std::endl;
         for (size_t i = 0; i < std::min(candidates.size(), size_t(5)); i++) {

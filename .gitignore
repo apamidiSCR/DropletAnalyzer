@@ -68,6 +68,7 @@ Thumbs.db
 
 # Data files
 DINJ_2_Test/
+Test_Data/
 
 # Keep these important directories and files:
 # - CMakeLists.txt files

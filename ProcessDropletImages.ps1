@@ -7,7 +7,25 @@ param(
 )
 
 # Configuration
-$DropletAnalyzerExe = "C:\Dev\DropletAnalyzer\DropletAnalyzer_OCV\build\Debug\DropletAnalyzer.exe"
+# Try to find the executable in multiple possible locations
+$PossibleExePaths = @(
+    "C:\Dev\DropletAnalyzer\DropletAnalyzer_OCV\build\Debug\DropletAnalyzer.exe",
+    "C:\Dev\DropletAnalyzer\DropletAnalyzer_OCV\build\Release\DropletAnalyzer.exe",
+    "$PSScriptRoot\..\DropletAnalyzer_OCV\build\Debug\DropletAnalyzer.exe",
+    "$PSScriptRoot\..\DropletAnalyzer_OCV\build\Release\DropletAnalyzer.exe"
+)
+
+$DropletAnalyzerExe = $null
+foreach ($Path in $PossibleExePaths) {
+    if (Test-Path $Path) {
+        $DropletAnalyzerExe = $Path
+        break
+    }
+}
+
+if (-not $DropletAnalyzerExe) {
+    $DropletAnalyzerExe = "C:\Dev\DropletAnalyzer\DropletAnalyzer_OCV\build\Debug\DropletAnalyzer.exe"
+}
 
 # Create output folder
 $OutputFolder = "Outputs"
@@ -22,9 +40,12 @@ Write-Host ""
 # Check if DropletAnalyzer executable exists
 if (-not (Test-Path $DropletAnalyzerExe)) {
     Write-Error "DropletAnalyzer executable not found at: $DropletAnalyzerExe"
-    Write-Error "Please update the DropletAnalyzerExe variable in the script."
+    Write-Error "Please build the DropletAnalyzer C++ project first."
     exit 1
 }
+
+Write-Host "Using executable: $DropletAnalyzerExe"
+Write-Host ""
 
 # Create output folder if it doesn't exist
 if (-not (Test-Path $OutputFolder)) {
