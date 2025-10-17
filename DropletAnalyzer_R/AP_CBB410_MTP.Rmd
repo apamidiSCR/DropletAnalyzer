@@ -1,0 +1,379 @@
+---
+title: "AP_CBB410_MTP"
+author: "Arjun S. Pamidi"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Introduction
+
+This document analyzes microfluidic droplet injection experiments where we systematically vary:
+
+- **Femulsion**: Emulsion flow rate (held constant within groups)
+- **Finject**: Injection flow rate (varied within voltage sweeps)
+- **Voltage**: Electrode voltage (varied first)
+
+The goal is to identify successful injections (medium-dark, larger droplets) versus spontaneous injections (clear, small) and uninjected droplets (very dark, smaller).
+
+# Load Libraries
+
+```{r libraries}
+library(tidyverse)
+library(plotly)
+```
+
+# Load and Prepare Data
+
+```{r load_data}
+# Read the CSV data - using relative path from RMD location
+droplet_data <- read_csv("Data/Test_Data_Results.csv")
+
+# Clean column names to remove special characters
+droplet_data <- droplet_data %>%
+  rename(
+    Measured = `Measured?`,
+    Valid = `Valid?`,
+    Diameter_um = `Diameter (um)`,
+    GrayVal_AU = `GrayVal (A.U.)`
+  )
+
+# Extract experiment number from Code for proper ordering
+droplet_data <- droplet_data %>%
+  mutate(
+    exp_num = as.numeric(str_extract(Code, "\\d+$"))
+  ) %>%
+  arrange(exp_num)
+
+# Create summary of experimental parameters for each code
+exp_params <- droplet_data %>%
+  group_by(Code, exp_num) %>%
+  summarise(
+    Femulsion = first(Femulsion),
+    Finject = first(Finject),
+    Voltage = first(Voltage),
+    n_droplets = n(),
+    n_valid = sum(Valid == "VALID", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(exp_num)
+
+# Display the experimental plan
+head(exp_params, 10)
+```
+
+# Data Overview
+
+```{r data_summary}
+# Summary statistics
+cat("Total experiments:", n_distinct(droplet_data$Code), "\n")
+cat("Total droplets analyzed:", nrow(droplet_data), "\n")
+cat("Valid droplets:", sum(droplet_data$Valid == "VALID", na.rm = TRUE), "\n\n")
+
+# Parameter ranges
+cat("Parameter Ranges:\n")
+cat("Femulsion:", paste(range(droplet_data$Femulsion, na.rm = TRUE), collapse = " - "), "\n")
+cat("Finject:", paste(range(droplet_data$Finject, na.rm = TRUE), collapse = " - "), "\n")
+cat("Voltage:", paste(range(droplet_data$Voltage, na.rm = TRUE), collapse = " - "), "\n")
+```
+
+# Histogram Analysis: Diameter Distribution by Flow Parameters
+
+These histograms show droplet diameter distribution faceted by Femulsion (rows) and Finject (columns), with separate plots for each voltage level. Bar colors represent the mean gray value of droplets in that bin, helping identify different droplet populations. Each experiment uses its own Freedman-Diaconis bin width.
+
+```{r histogram_prep}
+# Filter to valid droplets
+valid_droplets <- droplet_data %>%
+  filter(Valid == "VALID")
+
+# Calculate Freedman-Diaconis bin width for diameter per experiment
+fd_binwidth <- function(x) {
+  iqr_val <- IQR(x, na.rm = TRUE)
+  n <- sum(!is.na(x))
+  if (n < 2 || iqr_val == 0) {
+    # Fallback for experiments with too few droplets or no variation
+    return(diff(range(x, na.rm = TRUE)) / 10)
+  }
+  bw <- 2 * iqr_val / (n^(1/3))
+  return(bw)
+}
+
+# Show bin width statistics
+exp_binwidths <- valid_droplets %>%
+  group_by(Femulsion, Finject, Voltage) %>%
+  summarise(
+    binwidth = fd_binwidth(Diameter_um),
+    n_droplets = n(),
+    .groups = "drop"
+  )
+
+cat("Freedman-Diaconis bin width statistics:\n")
+cat("Median:", round(median(exp_binwidths$binwidth, na.rm = TRUE), 2), "μm\n")
+cat("Range:", round(min(exp_binwidths$binwidth), 2), "-", 
+    round(max(exp_binwidths$binwidth), 2), "μm\n\n")
+
+# Get unique voltage levels
+voltage_levels <- sort(unique(valid_droplets$Voltage))
+cat("Creating", length(voltage_levels), "separate plots (one per voltage level)\n")
+```
+
+```{r histogram_voltage_250, fig.width=16, fig.height=10}
+# Plot for Voltage = 250V
+v1 <- voltage_levels[1]
+
+plot_data_v1 <- valid_droplets %>%
+  filter(Voltage == v1) %>%
+  group_by(Femulsion, Finject) %>%
+  mutate(
+    binwidth_exp = fd_binwidth(Diameter_um),
+    diameter_bin = cut(Diameter_um, 
+                       breaks = seq(floor(min(Diameter_um, na.rm = TRUE)), 
+                                   ceiling(max(Diameter_um, na.rm = TRUE)), 
+                                   by = binwidth_exp[1]),
+                       include.lowest = TRUE)
+  ) %>%
+  group_by(Femulsion, Finject, diameter_bin, binwidth_exp) %>%
+  summarise(
+    count = n(),
+    mean_grayval = mean(GrayVal_AU, na.rm = TRUE),
+    bin_center = mean(Diameter_um, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(diameter_bin))
+
+ggplot(plot_data_v1, aes(x = bin_center, y = count, fill = mean_grayval)) +
+  geom_col(aes(width = binwidth_exp * 0.9), position = "identity") +
+  facet_grid(Femulsion ~ Finject, 
+             labeller = labeller(Femulsion = label_both, 
+                                Finject = label_both),
+             scales = "free") +
+  scale_fill_viridis_c(option = "viridis", name = "Mean Gray Value\n(A.U.)") +
+  labs(
+    title = paste("Droplet Diameter Distribution at Voltage =", v1, "V"),
+    subtitle = "Faceted by Femulsion (rows) and Finject (columns)",
+    x = "Droplet Diameter (μm)",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    legend.position = "right",
+    panel.spacing = unit(0.3, "lines")
+  )
+```
+
+```{r histogram_voltage_500, fig.width=16, fig.height=10}
+# Plot for Voltage = 500V
+v2 <- voltage_levels[2]
+
+plot_data_v2 <- valid_droplets %>%
+  filter(Voltage == v2) %>%
+  group_by(Femulsion, Finject) %>%
+  mutate(
+    binwidth_exp = fd_binwidth(Diameter_um),
+    diameter_bin = cut(Diameter_um, 
+                       breaks = seq(floor(min(Diameter_um, na.rm = TRUE)), 
+                                   ceiling(max(Diameter_um, na.rm = TRUE)), 
+                                   by = binwidth_exp[1]),
+                       include.lowest = TRUE)
+  ) %>%
+  group_by(Femulsion, Finject, diameter_bin, binwidth_exp) %>%
+  summarise(
+    count = n(),
+    mean_grayval = mean(GrayVal_AU, na.rm = TRUE),
+    bin_center = mean(Diameter_um, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(diameter_bin))
+
+ggplot(plot_data_v2, aes(x = bin_center, y = count, fill = mean_grayval)) +
+  geom_col(aes(width = binwidth_exp * 0.9), position = "identity") +
+  facet_grid(Femulsion ~ Finject, 
+             labeller = labeller(Femulsion = label_both, 
+                                Finject = label_both),
+             scales = "free") +
+  scale_fill_viridis_c(option = "viridis", name = "Mean Gray Value\n(A.U.)") +
+  labs(
+    title = paste("Droplet Diameter Distribution at Voltage =", v2, "V"),
+    subtitle = "Faceted by Femulsion (rows) and Finject (columns)",
+    x = "Droplet Diameter (μm)",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    legend.position = "right",
+    panel.spacing = unit(0.3, "lines")
+  )
+```
+
+```{r histogram_voltage_750, fig.width=16, fig.height=10}
+# Plot for Voltage = 750V
+v3 <- voltage_levels[3]
+
+plot_data_v3 <- valid_droplets %>%
+  filter(Voltage == v3) %>%
+  group_by(Femulsion, Finject) %>%
+  mutate(
+    binwidth_exp = fd_binwidth(Diameter_um),
+    diameter_bin = cut(Diameter_um, 
+                       breaks = seq(floor(min(Diameter_um, na.rm = TRUE)), 
+                                   ceiling(max(Diameter_um, na.rm = TRUE)), 
+                                   by = binwidth_exp[1]),
+                       include.lowest = TRUE)
+  ) %>%
+  group_by(Femulsion, Finject, diameter_bin, binwidth_exp) %>%
+  summarise(
+    count = n(),
+    mean_grayval = mean(GrayVal_AU, na.rm = TRUE),
+    bin_center = mean(Diameter_um, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(diameter_bin))
+
+ggplot(plot_data_v3, aes(x = bin_center, y = count, fill = mean_grayval)) +
+  geom_col(aes(width = binwidth_exp * 0.9), position = "identity") +
+  facet_grid(Femulsion ~ Finject, 
+             labeller = labeller(Femulsion = label_both, 
+                                Finject = label_both),
+             scales = "free") +
+  scale_fill_viridis_c(option = "viridis", name = "Mean Gray Value\n(A.U.)") +
+  labs(
+    title = paste("Droplet Diameter Distribution at Voltage =", v3, "V"),
+    subtitle = "Faceted by Femulsion (rows) and Finject (columns)",
+    x = "Droplet Diameter (μm)",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    legend.position = "right",
+    panel.spacing = unit(0.3, "lines")
+  )
+```
+
+# Static Overview: All Experiments
+
+For comparison, here's a faceted view of a subset of experiments:
+
+```{r faceted_plot, fig.width=12, fig.height=10}
+# Select a subset of experiments for faceting (every 6th experiment)
+subset_codes <- exp_params$Code[seq(1, nrow(exp_params), by = 6)]
+
+valid_droplets %>%
+  filter(Code %in% subset_codes) %>%
+  ggplot(aes(x = Diameter_um, y = GrayVal_AU)) +
+  geom_point(alpha = 0.5, size = 1.5, color = "#2E86AB") +
+  facet_wrap(~Code, ncol = 4) +
+  labs(
+    title = "Droplet Characteristics Across Selected Experiments",
+    x = "Droplet Diameter (μm)",
+    y = "Gray Value (A.U.)"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    axis.text = element_text(size = 7)
+  )
+```
+
+# 3D Surface Plots: Parameter Effects
+
+These interactive 3D surface plots show how mean droplet diameter varies with Femulsion and Finject, with color representing mean gray value. Each plot represents a different voltage setting.
+
+```{r surface_prep}
+# Aggregate data by experiment to get mean values
+surface_data <- valid_droplets %>%
+  group_by(Code, Femulsion, Finject, Voltage) %>%
+  summarise(
+    mean_diameter = mean(Diameter_um, na.rm = TRUE),
+    mean_grayval = mean(GrayVal_AU, na.rm = TRUE),
+    n_droplets = n(),
+    .groups = "drop"
+  )
+
+# Get unique voltage values for faceting
+voltage_levels <- sort(unique(surface_data$Voltage))
+
+cat("Creating surface plots for", length(voltage_levels), "voltage levels\n")
+```
+
+```{r surface_plots, fig.width=10, fig.height=8}
+# Create a surface plot for each voltage level
+surface_plots <- lapply(voltage_levels, function(v) {
+  
+  # Filter data for this voltage
+  plot_data <- surface_data %>%
+    filter(Voltage == v)
+  
+  # Create matrix for surface plot
+  # We need to pivot the data into a matrix format
+  femulsion_vals <- sort(unique(plot_data$Femulsion))
+  finject_vals <- sort(unique(plot_data$Finject))
+  
+  # Create matrices for diameter (z) and grayval (color)
+  diameter_matrix <- matrix(NA, nrow = length(finject_vals), ncol = length(femulsion_vals))
+  grayval_matrix <- matrix(NA, nrow = length(finject_vals), ncol = length(femulsion_vals))
+  
+  for (i in seq_along(finject_vals)) {
+    for (j in seq_along(femulsion_vals)) {
+      matching_row <- plot_data %>%
+        filter(Femulsion == femulsion_vals[j], Finject == finject_vals[i])
+      
+      if (nrow(matching_row) > 0) {
+        diameter_matrix[i, j] <- matching_row$mean_diameter[1]
+        grayval_matrix[i, j] <- matching_row$mean_grayval[1]
+      }
+    }
+  }
+  
+  # Create the 3D surface plot
+  plot_ly() %>%
+    add_surface(
+      x = femulsion_vals,
+      y = finject_vals,
+      z = diameter_matrix,
+      surfacecolor = grayval_matrix,
+      colorscale = "Viridis",
+      colorbar = list(title = "Mean Gray Value (A.U.)"),
+      hovertemplate = paste(
+        "<b>Voltage:", v, "</b><br>",
+        "Femulsion: %{x}<br>",
+        "Finject: %{y}<br>",
+        "Mean Diameter: %{z:.2f} μm<br>",
+        "Mean Gray Value: %{surfacecolor:.2f}<br>",
+        "<extra></extra>"
+      )
+    ) %>%
+    layout(
+      title = paste("Mean Droplet Diameter vs. Flow Rates (Voltage =", v, "V)"),
+      scene = list(
+        xaxis = list(title = "Femulsion Flow Rate"),
+        yaxis = list(title = "Finject Flow Rate"),
+        zaxis = list(title = "Mean Diameter (μm)")
+      )
+    )
+})
+
+# Display all surface plots
+for (i in seq_along(surface_plots)) {
+  print(surface_plots[[i]])
+  cat("\n\n")
+}
+```
+
+# Next Steps
+
+Future analyses could include:
+
+1. **Clustering analysis**: Use k-means or density-based clustering to automatically identify injected, spontaneous, and uninjected droplet populations
+2. **Success rate metrics**: Calculate percentage of successful injections per experiment
+3. **Parameter optimization**: Identify optimal parameter combinations for maximum injection efficiency
+4. **Statistical modeling**: Model the relationship between parameters and droplet characteristics
+
+---
+
+*Analysis generated: `r Sys.Date()`*
+```
