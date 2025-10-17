@@ -428,7 +428,7 @@ struct CrossingAnalysis {
 };
 
 // Function to scan for crossings in a direction
-std::vector<int> scanForCrossings(const cv::Mat& thresholded, cv::Point center, int direction, int maxDistance) {
+std::vector<int> scanForCrossings(const cv::Mat& thresholded, cv::Point center, int direction, int maxDistance, int minRadius) {
     std::vector<int> crossings;
     uchar prevPixel = thresholded.at<uchar>(center.y, center.x);
     
@@ -448,7 +448,10 @@ std::vector<int> scanForCrossings(const cv::Mat& thresholded, cv::Point center, 
         
         uchar currentPixel = thresholded.at<uchar>(testPoint.y, testPoint.x);
         if (currentPixel != prevPixel) {
-            crossings.push_back(i);
+            // Only add crossing if it's beyond the minimum radius
+            if (i >= minRadius) {
+                crossings.push_back(i);
+            }
             prevPixel = currentPixel;
         }
     }
@@ -457,16 +460,16 @@ std::vector<int> scanForCrossings(const cv::Mat& thresholded, cv::Point center, 
 }
 
 // Function to analyze ring structure for TYPE_2_RING
-CrossingAnalysis analyzeRingStructure(const cv::Mat& thresholded, cv::Point center) {
+CrossingAnalysis analyzeRingStructure(const cv::Mat& thresholded, cv::Point center, int minRadius) {
     CrossingAnalysis analysis;
     
     // Scan in all four directions
     int maxDistance = std::min(thresholded.rows, thresholded.cols) / 2;
     
-    analysis.upDistances = scanForCrossings(thresholded, center, 0, maxDistance);
-    analysis.downDistances = scanForCrossings(thresholded, center, 1, maxDistance);
-    analysis.leftDistances = scanForCrossings(thresholded, center, 2, maxDistance);
-    analysis.rightDistances = scanForCrossings(thresholded, center, 3, maxDistance);
+    analysis.upDistances = scanForCrossings(thresholded, center, 0, maxDistance, minRadius);
+    analysis.downDistances = scanForCrossings(thresholded, center, 1, maxDistance, minRadius);
+    analysis.leftDistances = scanForCrossings(thresholded, center, 2, maxDistance, minRadius);
+    analysis.rightDistances = scanForCrossings(thresholded, center, 3, maxDistance, minRadius);
     
     analysis.upCrossings = static_cast<int>(analysis.upDistances.size());
     analysis.downCrossings = static_cast<int>(analysis.downDistances.size());
@@ -478,6 +481,45 @@ CrossingAnalysis analyzeRingStructure(const cv::Mat& thresholded, cv::Point cent
                         analysis.leftCrossings == 3 || analysis.rightCrossings == 3);
     
     return analysis;
+}
+
+// Function to balance crossing points for TYPE_2_RING (remove extra crossings from one direction)
+CrossingAnalysis balanceCrossingPoints(const CrossingAnalysis& analysis) {
+    CrossingAnalysis balanced = analysis;
+    
+    // Check vertical directions (up vs down)
+    int verticalDiff = analysis.upCrossings - analysis.downCrossings;
+    if (verticalDiff == 1) {
+        // Up has one more crossing, remove the first one
+        if (!balanced.upDistances.empty()) {
+            balanced.upDistances.erase(balanced.upDistances.begin());
+            balanced.upCrossings--;
+        }
+    } else if (verticalDiff == -1) {
+        // Down has one more crossing, remove the first one
+        if (!balanced.downDistances.empty()) {
+            balanced.downDistances.erase(balanced.downDistances.begin());
+            balanced.downCrossings--;
+        }
+    }
+    
+    // Check horizontal directions (left vs right)
+    int horizontalDiff = analysis.leftCrossings - analysis.rightCrossings;
+    if (horizontalDiff == 1) {
+        // Left has one more crossing, remove the first one
+        if (!balanced.leftDistances.empty()) {
+            balanced.leftDistances.erase(balanced.leftDistances.begin());
+            balanced.leftCrossings--;
+        }
+    } else if (horizontalDiff == -1) {
+        // Right has one more crossing, remove the first one
+        if (!balanced.rightDistances.empty()) {
+            balanced.rightDistances.erase(balanced.rightDistances.begin());
+            balanced.rightCrossings--;
+        }
+    }
+    
+    return balanced;
 }
 
 // Function to find optimal center and radius for ring
@@ -499,6 +541,36 @@ cv::Vec3f findOptimalRingCenterAndRadius(const CrossingAnalysis& analysis, cv::P
     }
     if (analysis.rightCrossings > targetIndex && targetIndex < analysis.rightDistances.size()) {
         rightDist.push_back(analysis.rightDistances[targetIndex]);
+    }
+    
+    // Validate that we have at least one vertical and one horizontal crossing
+    bool hasVertical = !upDist.empty() || !downDist.empty();
+    bool hasHorizontal = !leftDist.empty() || !rightDist.empty();
+    
+    if (!hasVertical || !hasHorizontal) {
+        // Return invalid circle (negative radius indicates failure)
+        return cv::Vec3f(static_cast<float>(originalCenter.x), static_cast<float>(originalCenter.y), -1.0f);
+    }
+    
+    // Calculate average distances for validation
+    double avgVertical = 0.0, avgHorizontal = 0.0;
+    int verticalCount = 0, horizontalCount = 0;
+    
+    if (!upDist.empty()) { avgVertical += upDist[0]; verticalCount++; }
+    if (!downDist.empty()) { avgVertical += downDist[0]; verticalCount++; }
+    if (!leftDist.empty()) { avgHorizontal += leftDist[0]; horizontalCount++; }
+    if (!rightDist.empty()) { avgHorizontal += rightDist[0]; horizontalCount++; }
+    
+    if (verticalCount > 0) avgVertical /= verticalCount;
+    if (horizontalCount > 0) avgHorizontal /= horizontalCount;
+    
+    // Validate that vertical and horizontal crossings are within 30% of each other
+    if (avgVertical > 0 && avgHorizontal > 0) {
+        double ratio = std::max(avgVertical, avgHorizontal) / std::min(avgVertical, avgHorizontal);
+        if (ratio > 1.3) { // More than 30% difference
+            // Return invalid circle (negative radius indicates failure)
+            return cv::Vec3f(static_cast<float>(originalCenter.x), static_cast<float>(originalCenter.y), -1.0f);
+        }
     }
     
     // Calculate optimal center by balancing distances
@@ -585,7 +657,7 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
     cv::Scalar paddingColor = calculateCornerBasedMean(upscaledGray);
     cv::Mat padded;
     cv::copyMakeBorder(upscaledGray, padded, padding, padding, padding, padding, cv::BORDER_CONSTANT, paddingColor);
-    cv::Mat blurred = applyGaussianBlur(padded, 25);
+    cv::Mat blurred = applyGaussianBlur(padded, 35);
     
     // Enhance contrast and threshold
     cv::Mat enhanced = enhanceContrast(blurred);
@@ -636,7 +708,7 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
     
     // Initial circle detection
     int scaledMinDist = static_cast<int>(50 * scaleFactor);
-    int scaledMinRadius = static_cast<int>(13 * scaleFactor);
+    int scaledMinRadius = static_cast<int>(15 * scaleFactor);
     int scaledMaxRadius = static_cast<int>(200 * scaleFactor);
     
     std::vector<cv::Vec3f> outerCircles = detectCircles(enhanced, 1.0, scaledMinDist, 45, 18, scaledMinRadius, scaledMaxRadius);
@@ -673,22 +745,41 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
         cv::erode(thresholded, thresholded_e, kernel);
         
         cv::Point originalCenter(cvRound(outerCircles[0][0]), cvRound(outerCircles[0][1]));
-        CrossingAnalysis analysis = analyzeRingStructure(thresholded_e, originalCenter);
+        CrossingAnalysis analysis = analyzeRingStructure(thresholded_e, originalCenter, scaledMinRadius);
         
-        // Find optimal center and radius
-        circleB = findOptimalRingCenterAndRadius(analysis, originalCenter, analysis.isRing2B);
-        assistanceApplied = true;
+        // For TYPE_2_RING, balance crossing points (remove extra crossings from one direction)
+        CrossingAnalysis balancedAnalysis = balanceCrossingPoints(analysis);
+        
+        // Find optimal center and radius using balanced analysis
+        circleB = findOptimalRingCenterAndRadius(balancedAnalysis, originalCenter, balancedAnalysis.isRing2B);
+        
+        // Check if assistance failed (negative radius indicates failure)
+        if (circleB[2] < 0) {
+            // Assistance failed, fall back to original circle
+            circleB = outerCircles[0];
+            assistanceApplied = false;
+                } else {
+            assistanceApplied = true;
+        }
         
         if (debugMode) {
             std::ofstream debugFile(debugFolder + "/debug.txt", std::ios::app);
             debugFile << "Assistance: TYPE_2_RING" << std::endl;
             debugFile << "Erosion: Applied (5x5 elliptical kernel)" << std::endl;
             debugFile << "Ring Type: " << (analysis.isRing2B ? "RING_2_B" : "RING_2_A") << std::endl;
-            debugFile << "Crossings: U" << analysis.upCrossings << " D" << analysis.downCrossings 
+            debugFile << "Original Crossings: U" << analysis.upCrossings << " D" << analysis.downCrossings 
                       << " L" << analysis.leftCrossings << " R" << analysis.rightCrossings << std::endl;
+            debugFile << "Balanced Crossings: U" << balancedAnalysis.upCrossings << " D" << balancedAnalysis.downCrossings 
+                      << " L" << balancedAnalysis.leftCrossings << " R" << balancedAnalysis.rightCrossings << std::endl;
             debugFile << "Original Center: (" << originalCenter.x << "," << originalCenter.y << ")" << std::endl;
-            debugFile << "New Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
-            debugFile << "New Radius: " << circleB[2] << std::endl;
+            if (assistanceApplied) {
+                debugFile << "New Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
+                debugFile << "New Radius: " << circleB[2] << std::endl;
+            } else {
+                debugFile << "Assistance FAILED - Using original circle" << std::endl;
+                debugFile << "Original Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
+                debugFile << "Original Radius: " << circleB[2] << std::endl;
+            }
             debugFile.close();
         }
     } else if (thresholdType == TYPE_3_WEIRD) {
@@ -698,11 +789,19 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
         cv::erode(thresholded, thresholded_e, kernel);
         
         cv::Point originalCenter(cvRound(outerCircles[0][0]), cvRound(outerCircles[0][1]));
-        CrossingAnalysis analysis = analyzeRingStructure(thresholded_e, originalCenter);
+        CrossingAnalysis analysis = analyzeRingStructure(thresholded_e, originalCenter, scaledMinRadius);
         
         // Find optimal center and radius (treat as RING_2_A)
         circleB = findOptimalRingCenterAndRadius(analysis, originalCenter, false);
-        assistanceApplied = true;
+        
+        // Check if assistance failed (negative radius indicates failure)
+        if (circleB[2] < 0) {
+            // Assistance failed, fall back to original circle
+            circleB = outerCircles[0];
+            assistanceApplied = false;
+        } else {
+            assistanceApplied = true;
+        }
         
         if (debugMode) {
             std::ofstream debugFile(debugFolder + "/debug.txt", std::ios::app);
@@ -711,8 +810,14 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
             debugFile << "Crossings: U" << analysis.upCrossings << " D" << analysis.downCrossings 
                       << " L" << analysis.leftCrossings << " R" << analysis.rightCrossings << std::endl;
             debugFile << "Original Center: (" << originalCenter.x << "," << originalCenter.y << ")" << std::endl;
-            debugFile << "New Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
-            debugFile << "New Radius: " << circleB[2] << std::endl;
+            if (assistanceApplied) {
+                debugFile << "New Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
+                debugFile << "New Radius: " << circleB[2] << std::endl;
+            } else {
+                debugFile << "Assistance FAILED - Using original circle" << std::endl;
+                debugFile << "Original Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
+                debugFile << "Original Radius: " << circleB[2] << std::endl;
+            }
             debugFile.close();
         }
     }
@@ -749,7 +854,7 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
         
         // Draw actual crossing points detected on the eroded thresholded image
         cv::Point originalCenter(cvRound(outerCircles[0][0]), cvRound(outerCircles[0][1]));
-        CrossingAnalysis analysis = analyzeRingStructure(thresholded_e, originalCenter);
+        CrossingAnalysis analysis = analyzeRingStructure(thresholded_e, originalCenter, scaledMinRadius);
         
         // Draw actual crossing points with their distances
         // Up crossings
