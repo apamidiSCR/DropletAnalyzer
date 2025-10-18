@@ -47,7 +47,7 @@ cv::Mat applyGaussianBlur(const cv::Mat& input, int kernelSize = 5) {
 }
 
 // Function to enhance contrast using CLAHE
-cv::Mat enhanceContrast(const cv::Mat& input, double clipLimit = 2.0, int tileGridSize = 8) {
+cv::Mat enhanceContrast(const cv::Mat& input, double clipLimit = 2, int tileGridSize = 8) {
     cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(clipLimit, cv::Size(tileGridSize, tileGridSize));
     cv::Mat enhanced;
     clahe->apply(input, enhanced);
@@ -223,10 +223,14 @@ ThresholdType classifyThresholdType(const cv::Mat& thresholded) {
     if ((counts.horizontal + counts.vertical) * 2 < counts.diagonal) {
         return TYPE_3_WEIRD;
     }
-    if (counts.horizontal <= 4 && counts.vertical <= 4 && counts.diagonal <= 8) {
+
+    if (((counts.horizontal + counts.vertical) == counts.diagonal) && (counts.horizontal + counts.vertical + counts.diagonal) <=8) {
         return TYPE_1_FILLED;
     }
-    return TYPE_2_RING;
+    if (counts.horizontal <= 4 && counts.vertical <= 4 && counts.diagonal <= 8) {
+        return TYPE_2_RING;
+    }
+    return TYPE_1_FILLED;
 }
 
 // Function to extract droplet number from filename
@@ -347,7 +351,7 @@ bool validateCircles(const std::vector<cv::Vec3f>& circles, int dropletNumber, c
     int unpaddedWidth = enhancedImage.cols - (2 * padding);
     int unpaddedHeight = enhancedImage.rows - (2 * padding);
     // Use a smaller, fixed margin instead of percentage-based
-    int margin = 5; // Reduced margin to 5 pixels
+    int margin = 10; // Reduced margin to 5 pixels
     
     // Check bounds - circle can extend up to 10 pixels beyond the unpadded boundary
     bool outOfBounds = false;
@@ -664,6 +668,12 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
     cv::Mat thresholded;
     cv::threshold(enhanced, thresholded, 0, 255, cv::THRESH_BINARY + cv::THRESH_OTSU);
     
+    // Save enhanced image in debug mode
+    if (debugMode) {
+        std::string enhancedFilename = debugFolder + "/" + std::to_string(dropletNumber) + "_ENHANCECON.jpg";
+        cv::imwrite(enhancedFilename, enhanced);
+    }
+    
     // Classify threshold type
     ThresholdType thresholdType = classifyThresholdType(thresholded);
     // Threshold type determined (logged to debug.txt)
@@ -707,11 +717,11 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
     
     
     // Initial circle detection
-    int scaledMinDist = static_cast<int>(50 * scaleFactor);
-    int scaledMinRadius = static_cast<int>(15 * scaleFactor);
+    int scaledMinDist = static_cast<int>(60 * scaleFactor); // Increased from 50 to 60
+    int scaledMinRadius = static_cast<int>(10 * scaleFactor);
     int scaledMaxRadius = static_cast<int>(200 * scaleFactor);
     
-    std::vector<cv::Vec3f> outerCircles = detectCircles(enhanced, 1.0, scaledMinDist, 45, 18, scaledMinRadius, scaledMaxRadius);
+    std::vector<cv::Vec3f> outerCircles = detectCircles(enhanced, 1.0, scaledMinDist, 45, 22, scaledMinRadius, scaledMaxRadius); // Increased param2 from 18 to 22
     // Initial circle detection completed
     
     // Update debug.txt with circle detection info
@@ -728,8 +738,23 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
     
     // Apply new assistance logic based on threshold type
     cv::Vec3f circleB = outerCircles[0]; // Default to CIRCLE_A
+    cv::Vec3f circleC = outerCircles[0]; // Default to CIRCLE_A for scope
     bool assistanceApplied = false;
     cv::Mat thresholded_e; // Declare at function scope for debug output
+    std::vector<cv::Point> rightScanPoints, leftScanPoints; // Store scan points for visualization
+    
+    // Structure to hold scan results for each direction
+    struct ScanResult {
+        std::vector<cv::Point> outwardPoints, inwardPoints;
+        std::vector<double> outwardGrayValues, inwardGrayValues;
+        std::vector<double> outwardSlopes, inwardSlopes;
+        double outwardMin, inwardMin;
+        double outwardMinPos, inwardMinPos;
+        double outwardDrop, inwardDrop;
+        bool votesUnderestimate, votesOverestimate;
+    };
+    
+    std::vector<ScanResult> scanResults(8); // 8 directions: Right, BR, Bottom, BL, Left, TL, Top, TR
     
     if (thresholdType == TYPE_1_FILLED) {
         // Type 1 detected: No assistance needed
@@ -741,36 +766,366 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
     } else if (thresholdType == TYPE_2_RING) {
         // Type 2 detected: Applying ring analysis assistance
         // Apply more aggressive erosion to thresholded image for smaller CIRCLE_B
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(8, 8));
         cv::erode(thresholded, thresholded_e, kernel);
         
+        // Apply morphological opening with 6x6 kernel
+        cv::Mat openingKernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(6, 6));
+        cv::morphologyEx(thresholded_e, thresholded_e, cv::MORPH_OPEN, openingKernel);
+        
+        // Reclassify circle type after morphological opening (small white islands may have been removed)
+        ThresholdType reclassifiedType = classifyThresholdType(thresholded_e);
+        
+        // Declare variables for debug output
         cv::Point originalCenter(cvRound(outerCircles[0][0]), cvRound(outerCircles[0][1]));
-        CrossingAnalysis analysis = analyzeRingStructure(thresholded_e, originalCenter, scaledMinRadius);
+        CrossingAnalysis analysis;
+        CrossingAnalysis balancedAnalysis;
         
-        // For TYPE_2_RING, balance crossing points (remove extra crossings from one direction)
-        CrossingAnalysis balancedAnalysis = balanceCrossingPoints(analysis);
-        
-        // Find optimal center and radius using balanced analysis
-        circleB = findOptimalRingCenterAndRadius(balancedAnalysis, originalCenter, balancedAnalysis.isRing2B);
-        
-        // Check if assistance failed (negative radius indicates failure)
-        if (circleB[2] < 0) {
-            // Assistance failed, fall back to original circle
+        // If reclassified as TYPE_1_FILLED, use original circle (no assistance needed)
+        if (reclassifiedType == TYPE_1_FILLED) {
             circleB = outerCircles[0];
             assistanceApplied = false;
+        } else {
+            // Still TYPE_2_RING or TYPE_3_WEIRD, proceed with ring analysis
+            analysis = analyzeRingStructure(thresholded_e, originalCenter, scaledMinRadius);
+            
+            // For TYPE_2_RING, balance crossing points (remove extra crossings from one direction)
+            balancedAnalysis = balanceCrossingPoints(analysis);
+            
+            // Find optimal center and radius using balanced analysis
+            circleB = findOptimalRingCenterAndRadius(balancedAnalysis, originalCenter, balancedAnalysis.isRing2B);
+            
+            // Check if assistance failed (negative radius indicates failure)
+            if (circleB[2] < 0) {
+                // Assistance failed, fall back to original circle
+                circleB = outerCircles[0];
+                assistanceApplied = false;
+            } else {
+                assistanceApplied = true;
+            }
+        }
+        
+        // Radius validation for TYPE_2_RING using 8-directional scanning technique
+        circleC = circleB; // Update CIRCLE_C
+        if (assistanceApplied) {
+            // Perform 8-directional radius validation scanning
+            cv::Point centerB(cvRound(circleB[0]), cvRound(circleB[1]));
+            int radiusB = static_cast<int>(circleB[2]);
+            
+            // Calculate scan distance as 1/2 of the original circle radius (CIRCLE_A)
+            int originalRadius = static_cast<int>(outerCircles[0][2]);
+            int scanDistance = originalRadius / 2;
+            
+            // Define 8 direction vectors (outward directions from circle perimeter)
+            std::vector<cv::Point> directions = {
+                cv::Point(1, 0),    // Right
+                cv::Point(1, 1),    // Bottom-Right (normalized)
+                cv::Point(0, 1),    // Bottom
+                cv::Point(-1, 1),   // Bottom-Left (normalized)
+                cv::Point(-1, 0),   // Left
+                cv::Point(-1, -1),  // Top-Left (normalized)
+                cv::Point(0, -1),   // Top
+                cv::Point(1, -1)    // Top-Right (normalized)
+            };
+            
+            // Normalize diagonal directions
+            for (int i = 0; i < 8; i++) {
+                if (i % 2 == 1) { // Diagonal directions (1, 3, 5, 7)
+                    double length = std::sqrt(directions[i].x * directions[i].x + directions[i].y * directions[i].y);
+                    directions[i].x = static_cast<int>(std::round(directions[i].x / length));
+                    directions[i].y = static_cast<int>(std::round(directions[i].y / length));
+                }
+            }
+            
+            // Scan in each of the 8 directions
+            for (int dir = 0; dir < 8; dir++) {
+                // Calculate starting point on circle perimeter
+                cv::Point startPoint(centerB.x + radiusB * directions[dir].x, 
+                                   centerB.y + radiusB * directions[dir].y);
+                
+                // Outward scan (away from center)
+                for (int i = 0; i <= scanDistance; i++) {
+                    cv::Point scanPoint(startPoint.x + i * directions[dir].x, 
+                                      startPoint.y + i * directions[dir].y);
+                    if (scanPoint.x >= 0 && scanPoint.x < enhanced.cols && 
+                        scanPoint.y >= 0 && scanPoint.y < enhanced.rows) {
+                        scanResults[dir].outwardPoints.push_back(scanPoint);
+                        double grayValue = static_cast<double>(enhanced.at<uchar>(scanPoint.y, scanPoint.x));
+                        scanResults[dir].outwardGrayValues.push_back(grayValue);
+                        
+                        // Calculate slope (except for last point)
+                        if (i < scanDistance) {
+                            cv::Point nextPoint(startPoint.x + (i + 1) * directions[dir].x,
+                                              startPoint.y + (i + 1) * directions[dir].y);
+                            if (nextPoint.x >= 0 && nextPoint.x < enhanced.cols && 
+                                nextPoint.y >= 0 && nextPoint.y < enhanced.rows) {
+                                double nextGrayValue = static_cast<double>(enhanced.at<uchar>(nextPoint.y, nextPoint.x));
+                                double slope = grayValue - nextGrayValue;
+                                scanResults[dir].outwardSlopes.push_back(slope);
+                            }
+                        }
+                    }
+                }
+                
+                // Inward scan (toward center)
+                for (int i = 0; i <= scanDistance; i++) {
+                    cv::Point scanPoint(startPoint.x - i * directions[dir].x, 
+                                      startPoint.y - i * directions[dir].y);
+                    if (scanPoint.x >= 0 && scanPoint.x < enhanced.cols && 
+                        scanPoint.y >= 0 && scanPoint.y < enhanced.rows) {
+                        scanResults[dir].inwardPoints.push_back(scanPoint);
+                        double grayValue = static_cast<double>(enhanced.at<uchar>(scanPoint.y, scanPoint.x));
+                        scanResults[dir].inwardGrayValues.push_back(grayValue);
+                        
+                        // Calculate slope (except for last point)
+                        if (i < scanDistance) {
+                            cv::Point nextPoint(startPoint.x - (i + 1) * directions[dir].x,
+                                              startPoint.y - (i + 1) * directions[dir].y);
+                            if (nextPoint.x >= 0 && nextPoint.x < enhanced.cols && 
+                                nextPoint.y >= 0 && nextPoint.y < enhanced.rows) {
+                                double nextGrayValue = static_cast<double>(enhanced.at<uchar>(nextPoint.y, nextPoint.x));
+                                double slope = grayValue - nextGrayValue;
+                                scanResults[dir].inwardSlopes.push_back(slope);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // First, determine if CIRCLE_B is an overestimate or underestimate
+            // by comparing its radius to the second and third diagonal crossing distances
+            double secondCrossingAvg = 0.0;
+            double thirdCrossingAvg = 0.0;
+            int secondCount = 0, thirdCount = 0;
+            
+            // Calculate average second crossing distance
+            if (analysis.upCrossings > 1 && analysis.upDistances.size() > 1) {
+                secondCrossingAvg += analysis.upDistances[1];
+                secondCount++;
+            }
+            if (analysis.downCrossings > 1 && analysis.downDistances.size() > 1) {
+                secondCrossingAvg += analysis.downDistances[1];
+                secondCount++;
+            }
+            if (analysis.leftCrossings > 1 && analysis.leftDistances.size() > 1) {
+                secondCrossingAvg += analysis.leftDistances[1];
+                secondCount++;
+            }
+            if (analysis.rightCrossings > 1 && analysis.rightDistances.size() > 1) {
+                secondCrossingAvg += analysis.rightDistances[1];
+                secondCount++;
+            }
+            if (secondCount > 0) secondCrossingAvg /= secondCount;
+            
+            // Calculate average third crossing distance
+            if (analysis.upCrossings > 2 && analysis.upDistances.size() > 2) {
+                thirdCrossingAvg += analysis.upDistances[2];
+                thirdCount++;
+            }
+            if (analysis.downCrossings > 2 && analysis.downDistances.size() > 2) {
+                thirdCrossingAvg += analysis.downDistances[2];
+                thirdCount++;
+            }
+            if (analysis.leftCrossings > 2 && analysis.leftDistances.size() > 2) {
+                thirdCrossingAvg += analysis.leftDistances[2];
+                thirdCount++;
+            }
+            if (analysis.rightCrossings > 2 && analysis.rightDistances.size() > 2) {
+                thirdCrossingAvg += analysis.rightDistances[2];
+                thirdCount++;
+            }
+            if (thirdCount > 0) thirdCrossingAvg /= thirdCount;
+            
+            // Determine if CIRCLE_B is overestimated or underestimated
+            bool isOverestimated = false;
+            bool isUnderestimated = false;
+            double circleBRadius = circleB[2];
+            
+            if (thirdCount > 0) {
+                // We have both second and third crossings - compare to both
+                double distToSecond = std::abs(circleBRadius - secondCrossingAvg);
+                double distToThird = std::abs(circleBRadius - thirdCrossingAvg);
+                
+                if (distToThird < distToSecond) {
+                    isOverestimated = true; // Closer to third crossings (overestimate)
                 } else {
-            assistanceApplied = true;
+                    isUnderestimated = true; // Closer to second crossings (underestimate)
+                }
+            } else {
+                // Only second crossings available - assume underestimate if radius is smaller
+                if (circleBRadius < secondCrossingAvg) {
+                    isUnderestimated = true;
+                } else {
+                    isOverestimated = true;
+                }
+            }
+            
+            // Analyze patterns for each direction and collect votes
+            int overestimateVotes = 0;
+            int underestimateVotes = 0;
+            std::vector<double> overestimateAdjustments;
+            std::vector<double> underestimateAdjustments;
+            
+            for (int dir = 0; dir < 8; dir++) {
+                // Calculate minimums for this direction
+                if (!scanResults[dir].outwardGrayValues.empty()) {
+                    scanResults[dir].outwardMin = *std::min_element(scanResults[dir].outwardGrayValues.begin(), 
+                                                                  scanResults[dir].outwardGrayValues.end());
+                }
+                if (!scanResults[dir].inwardGrayValues.empty()) {
+                    scanResults[dir].inwardMin = *std::min_element(scanResults[dir].inwardGrayValues.begin(), 
+                                                                 scanResults[dir].inwardGrayValues.end());
+                }
+                
+                // Find minimum positions
+                for (size_t i = 0; i < scanResults[dir].outwardGrayValues.size(); i++) {
+                    if (scanResults[dir].outwardGrayValues[i] == scanResults[dir].outwardMin) {
+                        scanResults[dir].outwardMinPos = static_cast<double>(i);
+                        break;
+                    }
+                }
+                
+                for (size_t i = 0; i < scanResults[dir].inwardGrayValues.size(); i++) {
+                    if (scanResults[dir].inwardGrayValues[i] == scanResults[dir].inwardMin) {
+                        scanResults[dir].inwardMinPos = static_cast<double>(i);
+                        break;
+                    }
+                }
+                
+                // Calculate gray value drops
+                if (!scanResults[dir].outwardGrayValues.empty() && !scanResults[dir].inwardGrayValues.empty()) {
+                    double outwardStartGrayValue = scanResults[dir].outwardGrayValues[0];
+                    scanResults[dir].outwardDrop = outwardStartGrayValue - scanResults[dir].outwardMin;
+                    
+                    double inwardStartGrayValue = scanResults[dir].inwardGrayValues[0];
+                    scanResults[dir].inwardDrop = inwardStartGrayValue - scanResults[dir].inwardMin;
+                    
+                    // Smart scanning: only look in the appropriate direction based on over/underestimate
+                    if (isUnderestimated) {
+                        // For underestimates, only look at outward scans to find the true boundary
+                        if (scanResults[dir].outwardDrop > 30.0 && 
+                            scanResults[dir].outwardMinPos > 5 && scanResults[dir].outwardMinPos < scanDistance) {
+                            scanResults[dir].votesUnderestimate = true;
+                            scanResults[dir].votesOverestimate = false;
+                            underestimateVotes++;
+                            underestimateAdjustments.push_back(scanResults[dir].outwardMinPos);
+                        } else {
+                            scanResults[dir].votesOverestimate = false;
+                            scanResults[dir].votesUnderestimate = false;
+                        }
+                    } else if (isOverestimated) {
+                        // For overestimates, only look at inward scans to find the true boundary
+                        if (scanResults[dir].inwardDrop > 30.0 && 
+                            scanResults[dir].inwardMinPos > 5 && scanResults[dir].inwardMinPos < scanDistance) {
+                            scanResults[dir].votesOverestimate = true;
+                            scanResults[dir].votesUnderestimate = false;
+                            overestimateVotes++;
+                            overestimateAdjustments.push_back(scanResults[dir].inwardMinPos);
+                        } else {
+                            scanResults[dir].votesOverestimate = false;
+                            scanResults[dir].votesUnderestimate = false;
+                        }
+                    } else {
+                        // No clear determination - use original logic
+                        if (scanResults[dir].inwardDrop > scanResults[dir].outwardDrop && 
+                            scanResults[dir].inwardMinPos > 5 && scanResults[dir].inwardMinPos < scanDistance && 
+                            scanResults[dir].inwardDrop > 30.0) {
+                            scanResults[dir].votesOverestimate = true;
+                            scanResults[dir].votesUnderestimate = false;
+                            overestimateVotes++;
+                            overestimateAdjustments.push_back(scanResults[dir].inwardMinPos);
+                        } else if (scanResults[dir].outwardDrop > scanResults[dir].inwardDrop && 
+                                  scanResults[dir].outwardMinPos > 5 && scanResults[dir].outwardMinPos < scanDistance && 
+                                  scanResults[dir].outwardDrop > 30.0) {
+                            scanResults[dir].votesUnderestimate = true;
+                            scanResults[dir].votesOverestimate = false;
+                            underestimateVotes++;
+                            underestimateAdjustments.push_back(scanResults[dir].outwardMinPos);
+                        } else {
+                            scanResults[dir].votesOverestimate = false;
+                            scanResults[dir].votesUnderestimate = false;
+                        }
+                    }
+                }
+            }
+            
+            // Determine final adjustment based on majority vote
+            double adjustedRadius = circleB[2];
+            
+            if (overestimateVotes > underestimateVotes && overestimateVotes > 0) {
+                // Majority votes for overestimate
+                isOverestimated = true;
+                double avgAdjustment = 0.0;
+                for (double adj : overestimateAdjustments) avgAdjustment += adj;
+                avgAdjustment /= overestimateAdjustments.size();
+                adjustedRadius = circleB[2] - avgAdjustment;
+                adjustedRadius = std::max(adjustedRadius, circleB[2] * 0.7); // Don't reduce by more than 30%
+            } else if (underestimateVotes > overestimateVotes && underestimateVotes > 0) {
+                // Majority votes for underestimate
+                isUnderestimated = true;
+                double avgAdjustment = 0.0;
+                for (double adj : underestimateAdjustments) avgAdjustment += adj;
+                avgAdjustment /= underestimateAdjustments.size();
+                adjustedRadius = circleB[2] + avgAdjustment;
+                adjustedRadius = std::min(adjustedRadius, circleB[2] * 1.3); // Don't increase by more than 30%
+            }
+            
+            // Update CIRCLE_C with adjusted radius
+            circleC = cv::Vec3f(circleB[0], circleB[1], static_cast<float>(adjustedRadius));
+            
+            if (debugMode) {
+                std::ofstream debugFile(debugFolder + "/debug.txt", std::ios::app);
+                debugFile << "8-Directional Radius Validation Scan Results:" << std::endl;
+                debugFile << "Crossing Distance Analysis (Diagonal Crossings):" << std::endl;
+                debugFile << "  Second Crossing Average: " << secondCrossingAvg << " (from " << secondCount << " directions)" << std::endl;
+                debugFile << "  Third Crossing Average: " << thirdCrossingAvg << " (from " << thirdCount << " directions)" << std::endl;
+                debugFile << "  Circle B Radius: " << circleBRadius << std::endl;
+                debugFile << "  Distance to Second: " << std::abs(circleBRadius - secondCrossingAvg) << std::endl;
+                if (thirdCount > 0) {
+                    debugFile << "  Distance to Third: " << std::abs(circleBRadius - thirdCrossingAvg) << std::endl;
+                }
+                debugFile << "Original Circle A Radius: " << originalRadius << std::endl;
+                debugFile << "Scan Distance (1/2r): " << scanDistance << std::endl;
+                debugFile << "Voting Results: Overestimate=" << overestimateVotes << ", Underestimate=" << underestimateVotes << std::endl;
+                debugFile << "Is Overestimated: " << (isOverestimated ? "YES" : "NO") << std::endl;
+                debugFile << "Is Underestimated: " << (isUnderestimated ? "YES" : "NO") << std::endl;
+                debugFile << "Original Radius B: " << circleB[2] << std::endl;
+                debugFile << "Adjusted Radius C: " << adjustedRadius << std::endl;
+                
+                // Output individual direction results
+                std::vector<std::string> directionNames = {"Right", "Bottom-Right", "Bottom", "Bottom-Left", "Left", "Top-Left", "Top", "Top-Right"};
+                for (int dir = 0; dir < 8; dir++) {
+                    debugFile << "Direction " << dir << " (" << directionNames[dir] << "): ";
+                    debugFile << "Outward Drop=" << scanResults[dir].outwardDrop << ", Inward Drop=" << scanResults[dir].inwardDrop << ", ";
+                    if (scanResults[dir].votesOverestimate) {
+                        debugFile << "Vote=OVERESTIMATE, Adjustment=" << scanResults[dir].inwardMinPos << std::endl;
+                    } else if (scanResults[dir].votesUnderestimate) {
+                        debugFile << "Vote=UNDERESTIMATE, Adjustment=" << scanResults[dir].outwardMinPos << std::endl;
+                    } else {
+                        debugFile << "Vote=NONE" << std::endl;
+                    }
+                }
+                
+                debugFile.close();
+            }
         }
         
         if (debugMode) {
             std::ofstream debugFile(debugFolder + "/debug.txt", std::ios::app);
             debugFile << "Assistance: TYPE_2_RING" << std::endl;
-            debugFile << "Erosion: Applied (5x5 elliptical kernel)" << std::endl;
-            debugFile << "Ring Type: " << (analysis.isRing2B ? "RING_2_B" : "RING_2_A") << std::endl;
-            debugFile << "Original Crossings: U" << analysis.upCrossings << " D" << analysis.downCrossings 
-                      << " L" << analysis.leftCrossings << " R" << analysis.rightCrossings << std::endl;
-            debugFile << "Balanced Crossings: U" << balancedAnalysis.upCrossings << " D" << balancedAnalysis.downCrossings 
-                      << " L" << balancedAnalysis.leftCrossings << " R" << balancedAnalysis.rightCrossings << std::endl;
+            debugFile << "Erosion: Applied (8x8 elliptical kernel)" << std::endl;
+            debugFile << "Morphological Opening: Applied (6x6 elliptical kernel)" << std::endl;
+            debugFile << "Reclassified Type: " << (reclassifiedType == TYPE_1_FILLED ? "TYPE_1_FILLED" : 
+                                                  reclassifiedType == TYPE_2_RING ? "TYPE_2_RING" : "TYPE_3_WEIRD") << std::endl;
+            if (reclassifiedType == TYPE_1_FILLED) {
+                debugFile << "Strategy: Reclassified as FILLED - Using original CIRCLE_A (no assistance applied)" << std::endl;
+            } else {
+                debugFile << "Ring Type: " << (analysis.isRing2B ? "RING_2_B" : "RING_2_A") << std::endl;
+                debugFile << "Original Crossings: U" << analysis.upCrossings << " D" << analysis.downCrossings 
+                          << " L" << analysis.leftCrossings << " R" << analysis.rightCrossings << std::endl;
+                debugFile << "Balanced Crossings: U" << balancedAnalysis.upCrossings << " D" << balancedAnalysis.downCrossings 
+                          << " L" << balancedAnalysis.leftCrossings << " R" << balancedAnalysis.rightCrossings << std::endl;
+            }
             debugFile << "Original Center: (" << originalCenter.x << "," << originalCenter.y << ")" << std::endl;
             if (assistanceApplied) {
                 debugFile << "New Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
@@ -783,41 +1138,16 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
             debugFile.close();
         }
     } else if (thresholdType == TYPE_3_WEIRD) {
-        // Type 3 detected: Applying ring analysis assistance (same as RING_2_A)
-        // Apply more aggressive erosion to thresholded image for smaller CIRCLE_B
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-        cv::erode(thresholded, thresholded_e, kernel);
-        
-        cv::Point originalCenter(cvRound(outerCircles[0][0]), cvRound(outerCircles[0][1]));
-        CrossingAnalysis analysis = analyzeRingStructure(thresholded_e, originalCenter, scaledMinRadius);
-        
-        // Find optimal center and radius (treat as RING_2_A)
-        circleB = findOptimalRingCenterAndRadius(analysis, originalCenter, false);
-        
-        // Check if assistance failed (negative radius indicates failure)
-        if (circleB[2] < 0) {
-            // Assistance failed, fall back to original circle
-            circleB = outerCircles[0];
-            assistanceApplied = false;
-        } else {
-            assistanceApplied = true;
-        }
+        // Type 3 detected: Use original CIRCLE_A as final circle (no assistance)
+        circleB = outerCircles[0];
+        assistanceApplied = false;
         
         if (debugMode) {
             std::ofstream debugFile(debugFolder + "/debug.txt", std::ios::app);
-            debugFile << "Assistance: TYPE_3_RING" << std::endl;
-            debugFile << "Erosion: Applied (5x5 elliptical kernel)" << std::endl;
-            debugFile << "Crossings: U" << analysis.upCrossings << " D" << analysis.downCrossings 
-                      << " L" << analysis.leftCrossings << " R" << analysis.rightCrossings << std::endl;
-            debugFile << "Original Center: (" << originalCenter.x << "," << originalCenter.y << ")" << std::endl;
-            if (assistanceApplied) {
-                debugFile << "New Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
-                debugFile << "New Radius: " << circleB[2] << std::endl;
-            } else {
-                debugFile << "Assistance FAILED - Using original circle" << std::endl;
-                debugFile << "Original Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
-                debugFile << "Original Radius: " << circleB[2] << std::endl;
-            }
+            debugFile << "Assistance: TYPE_3_WEIRD" << std::endl;
+            debugFile << "Strategy: Using original CIRCLE_A (no assistance applied)" << std::endl;
+            debugFile << "Original Center: (" << circleB[0] << "," << circleB[1] << ")" << std::endl;
+            debugFile << "Original Radius: " << circleB[2] << std::endl;
             debugFile.close();
         }
     }
@@ -885,8 +1215,8 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
         cv::imwrite(thresholdEFilename, thresholdEImg);
     }
     
-    // Use CIRCLE_B for final calculations
-    cv::Vec3f finalCircle = circleB;
+    // Use CIRCLE_C for TYPE_2_RING final calculations, otherwise CIRCLE_B
+    cv::Vec3f finalCircle = (thresholdType == TYPE_2_RING && assistanceApplied) ? circleC : circleB;
     
     // Calculate droplet radius from CIRCLE_B
     double dropletRadius = finalCircle[2] / scaleFactor;
@@ -926,11 +1256,60 @@ void processImage(const std::string& imagePath, const std::string& outputFolder,
         cv::imwrite(qcFilename, qcImage);
             // QC image saved
     
+    // Create debug QC image with both CIRCLE_B and CIRCLE_C for TYPE_2_RING
+    if (debugMode && thresholdType == TYPE_2_RING && assistanceApplied) {
+        cv::Mat debugQcImage = blurred.clone();
+        if (debugQcImage.channels() == 1) {
+            cv::cvtColor(debugQcImage, debugQcImage, cv::COLOR_GRAY2BGR);
+        }
+        
+        // Draw CIRCLE_B (original assisted circle) in blue
+        cv::Point circleBCenter(cvRound(circleB[0]), cvRound(circleB[1]));
+        int circleBRadius = static_cast<int>(circleB[2]);
+        cv::circle(debugQcImage, circleBCenter, circleBRadius, cv::Scalar(255, 0, 0), 2); // Blue
+        cv::circle(debugQcImage, circleBCenter, 3, cv::Scalar(0, 0, 255), -1); // Red center
+        
+        // Draw CIRCLE_C (validated circle) in green
+        cv::Point circleCCenter(cvRound(circleC[0]), cvRound(circleC[1]));
+        int circleCRadius = static_cast<int>(circleC[2]);
+        cv::circle(debugQcImage, circleCCenter, circleCRadius, cv::Scalar(0, 255, 0), 2); // Green
+        cv::circle(debugQcImage, circleCCenter, 3, cv::Scalar(0, 0, 255), -1); // Red center
+        
+        // Draw all scanned pixels from 8 directions
+        for (int dir = 0; dir < 8; dir++) {
+            // Draw outward scan points in red
+            for (size_t i = 0; i < scanResults[dir].outwardPoints.size(); i++) {
+                cv::circle(debugQcImage, scanResults[dir].outwardPoints[i], 1, cv::Scalar(0, 0, 255), -1); // Red dots
+            }
+            // Draw inward scan points in yellow
+            for (size_t i = 0; i < scanResults[dir].inwardPoints.size(); i++) {
+                cv::circle(debugQcImage, scanResults[dir].inwardPoints[i], 1, cv::Scalar(0, 255, 255), -1); // Yellow dots
+            }
+        }
+        
+        // Save debug QC image
+        std::string debugQcFilename = debugFolder + "/" + std::to_string(dropletNumber) + "_DEBUG_QC_CIRCLES_B_C.jpg";
+        cv::imwrite(debugQcFilename, debugQcImage);
+        
+        // Update debug.txt with CIRCLE_C information
+        std::ofstream debugFile(debugFolder + "/debug.txt", std::ios::app);
+        debugFile << "Debug QC Image: Both CIRCLE_B and CIRCLE_C drawn with 8-directional scan pixels" << std::endl;
+        debugFile << "Circle B (Blue): (" << circleB[0] << "," << circleB[1] << "), Radius: " << circleB[2] << std::endl;
+        debugFile << "Circle C (Green): (" << circleC[0] << "," << circleC[1] << "), Radius: " << circleC[2] << std::endl;
+        debugFile << "Scan Points: Red=Outward, Yellow=Inward (8 directions total)" << std::endl;
+        debugFile.close();
+    }
+    
     // Update debug.txt with final results
     if (debugMode) {
         std::ofstream debugFile(debugFolder + "/debug.txt", std::ios::app);
-        debugFile << "Final Circle B - Center: (" << finalCircle[0] << "," << finalCircle[1] << ")" << std::endl;
-        debugFile << "Final Circle B - Radius: " << finalCircle[2] << std::endl;
+        if (thresholdType == TYPE_2_RING && assistanceApplied) {
+            debugFile << "Final Circle C (Validated) - Center: (" << finalCircle[0] << "," << finalCircle[1] << ")" << std::endl;
+            debugFile << "Final Circle C (Validated) - Radius: " << finalCircle[2] << std::endl;
+        } else {
+            debugFile << "Final Circle B - Center: (" << finalCircle[0] << "," << finalCircle[1] << ")" << std::endl;
+            debugFile << "Final Circle B - Radius: " << finalCircle[2] << std::endl;
+        }
         debugFile << "Final Droplet Radius: " << dropletRadius << std::endl;
         debugFile << "Final Mean Gray: " << meanGrayValue << std::endl;
         debugFile.close();
