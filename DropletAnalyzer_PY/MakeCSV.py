@@ -11,7 +11,8 @@ def parse_qc_filename(filename):
     
     Expected format:
     - VALID: <index>_VALID_<diameter>_<grayval>.jpg (e.g., "1_VALID_12p45_103p22.jpg")
-    - INVALID: <index>_INVALID_0p00_0p00.jpg (e.g., "2_INVALID_0p00_0p00.jpg")
+    - INVALID (old): <index>_INVALID_0p00_0p00.jpg (e.g., "2_INVALID_0p00_0p00.jpg")
+    - INVALID (new): <index>_INVALID.jpg (e.g., "2_INVALID.jpg")
     
     Returns:
         tuple: (index, valid, diameter, grayval) or None if parsing fails
@@ -19,32 +20,42 @@ def parse_qc_filename(filename):
     # Remove file extension
     name = os.path.splitext(filename)[0]
     
-    # Pattern: <index>_<VALID|INVALID>_<diameter>_<grayval>
-    pattern = r'^(\d+)_(VALID|INVALID)_([\d]+p[\d]+)_([\d]+p[\d]+)$'
-    match = re.match(pattern, name)
+    # First try the full pattern: <index>_<VALID|INVALID>_<diameter>_<grayval>
+    pattern_full = r'^(\d+)_(VALID|INVALID)_([\d]+p[\d]+)_([\d]+p[\d]+)$'
+    match = re.match(pattern_full, name)
     
-    if not match:
-        return None
+    if match:
+        index = int(match.group(1))
+        valid = match.group(2)
+        diameter_str = match.group(3)
+        grayval_str = match.group(4)
+        
+        # Convert "p" notation back to decimal (e.g., "12p45" -> "12.45")
+        diameter = diameter_str.replace('p', '.')
+        grayval = grayval_str.replace('p', '.')
+        
+        # For INVALID images, set diameter and grayval to "NA"
+        if valid == "INVALID":
+            diameter = "NA"
+            grayval = "NA"
+        else:
+            # Keep the original precision from the filename
+            diameter = str(float(diameter))
+            grayval = str(float(grayval))
+        
+        return (index, valid, diameter, grayval)
     
-    index = int(match.group(1))
-    valid = match.group(2)
-    diameter_str = match.group(3)
-    grayval_str = match.group(4)
+    # If full pattern doesn't match, try the simplified INVALID pattern: <index>_INVALID
+    pattern_simple = r'^(\d+)_(INVALID)$'
+    match = re.match(pattern_simple, name)
     
-    # Convert "p" notation back to decimal (e.g., "12p45" -> "12.45")
-    diameter = diameter_str.replace('p', '.')
-    grayval = grayval_str.replace('p', '.')
+    if match:
+        index = int(match.group(1))
+        valid = match.group(2)
+        # For simple INVALID format, set diameter and grayval to "NA"
+        return (index, valid, "NA", "NA")
     
-    # For INVALID images, set diameter and grayval to "NA"
-    if valid == "INVALID":
-        diameter = "NA"
-        grayval = "NA"
-    else:
-        # Round to appropriate precision
-        diameter = f"{float(diameter):.0f}"  # Round to nearest integer
-        grayval = f"{float(grayval):.0f}"    # Round to nearest integer
-    
-    return (index, valid, diameter, grayval)
+    return None
 
 
 def load_experiment_template(template_csv_path):
@@ -114,7 +125,9 @@ def process_outputs_folder(experiment_code, outputs_path, experiment_params):
     for file in outputs_path.iterdir():
         if file.is_file() and file.suffix.lower() in ['.jpg', '.jpeg', '.png']:
             # Only process files that match the QC naming pattern
-            if '_VALID_' in file.name or '_INVALID_' in file.name:
+            # Check for VALID files with full format, or INVALID files (both old and new formats)
+            if ('_VALID_' in file.name or '_INVALID_' in file.name or 
+                file.name.endswith('_INVALID.jpg')):
                 image_files.append(file)
     
     # Sort by index number (extracted from filename)
@@ -146,7 +159,7 @@ def process_outputs_folder(experiment_code, outputs_path, experiment_params):
             'Measured?': experiment_params.get('Measured?', ''),
             'Index': index,
             'Valid?': valid,
-            'Diameter (um)': diameter,
+            'Radius (um)': diameter,
             'GrayVal (A.U.)': grayval
         }
         
@@ -230,7 +243,7 @@ def main():
     if all_rows:
         fieldnames = [
             'Code', 'Foil', 'Femulsion', 'Finject', 'Voltage', 'Measured?',
-            'Index', 'Valid?', 'Diameter (um)', 'GrayVal (A.U.)'
+            'Index', 'Valid?', 'Radius (um)', 'GrayVal (A.U.)'
         ]
         
         with open(output_csv_path, 'w', newline='') as csvfile:
