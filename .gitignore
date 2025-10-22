@@ -3,6 +3,9 @@ build/
 DropletAnalyzer_OCV/build/
 DropletAnalyzer_R/build/
 
+# Gitignore
+.gitignore
+
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/
@@ -74,6 +77,13 @@ PICOINJ_3_1_Full_Test/
 Test_Data_New/
 PICOINJ_4_DATA/
 Test_Data_New.zip
+
+# Some R Stuff
+DropletAnalyzer_R/AP_CBB410_MTP.Rmd
+DropletAnalyzer_R/AP_CBB410_MP.nb.html
+DropletAnalyzer_R/AP_CBB410_MP.pdf
+DropletAnalyzer_R/Test_Data_Truncated.csv
+DropletAnalyzer_R/Test_Data_Truncated.xlsx
 
 
 # Keep these important directories and files:

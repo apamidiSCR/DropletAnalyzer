@@ -1,0 +1,53 @@
+Droplet: 80
+Threshold Type: TYPE_2_RING
+Initial Circles Found: 1
+VALIDATION: PASSED
+Center: (152,146), Radius: 39
+Expected center: (149,149)
+Padding: 100, Unpadded: 98x98
+Margin: 10
+Valid region: x=[90,208], y=[90,208]
+Circle bounds: x=[113,191], y=[107,185]
+8-Directional Radius Validation Scan Results:
+Crossing Distance Analysis (Diagonal Crossings):
+  Second Crossing Average: 54.75 (from 4 directions)
+  Third Crossing Average: 0 (from 0 directions)
+  Circle B Radius: 37.75
+  Distance to Second: 17
+Original Circle A Radius: 39
+Scan Distance (1/2r): 19
+Voting Results: Overestimate=0, Underestimate=2
+Is Overestimated: NO
+Is Underestimated: YES
+Original Radius B: 37.75
+Adjusted Radius C: 49.075
+Direction 0 (Right): Outward Drop=13, Inward Drop=0, Vote=NONE
+Direction 1 (Bottom-Right): Outward Drop=0, Inward Drop=34, Vote=NONE
+Direction 2 (Bottom): Outward Drop=60, Inward Drop=0, Vote=UNDERESTIMATE, Adjustment=10
+Direction 3 (Bottom-Left): Outward Drop=0, Inward Drop=18, Vote=NONE
+Direction 4 (Left): Outward Drop=64, Inward Drop=0, Vote=UNDERESTIMATE, Adjustment=13
+Direction 5 (Top-Left): Outward Drop=0, Inward Drop=25, Vote=NONE
+Direction 6 (Top): Outward Drop=17, Inward Drop=0, Vote=NONE
+Direction 7 (Top-Right): Outward Drop=0, Inward Drop=31, Vote=NONE
+Assistance: TYPE_2_RING
+Erosion: Applied (8x8 elliptical kernel)
+Morphological Opening: Applied (6x6 elliptical kernel)
+Reclassified Type: TYPE_2_RING
+Ring Type: RING_2_A
+Original Crossings: U2 D2 L2 R2
+Balanced Crossings: U2 D2 L2 R2
+Original Center: (152,146)
+New Center: (154,144)
+New Radius: 37.75
+QC Image Coordinates:
+Circle B: (154,144), Radius: 49.075
+QC Center: (154,144), Radius: 49
+QC Image Size: 298x298
+Debug QC Image: Both CIRCLE_B and CIRCLE_C drawn with 8-directional scan pixels
+Circle B (Blue): (154,144), Radius: 37.75
+Circle C (Green): (154,144), Radius: 49.075
+Scan Points: Red=Outward, Yellow=Inward (8 directions total)
+Final Circle C (Validated) - Center: (154,144)
+Final Circle C (Validated) - Radius: 49.075
+Final Droplet Radius: 24.5375
+Final Mean Gray: 134.763
