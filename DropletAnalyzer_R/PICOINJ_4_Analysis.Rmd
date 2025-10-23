@@ -1,0 +1,247 @@
+---
+title: "PICOINJ_4_Results"
+author: "Arjun S. Pamidi"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+# ----- Data Import and Preprocessing -----
+
+```{r fig.width=16, fig.height=10}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(extrafont)
+
+
+# Read the CSV data from the data folder in the RMD directory.
+droplet_data <- read_csv(
+  "Data/PICOINJ_4_Results.csv",
+  col_types = cols(),
+  na = c("","NA")
+)
+
+# Let's display the first 10 rows of the tibble.
+head(droplet_data)
+
+# Let's tidy up the column headers and get rid of the '?', '()', and '.' 's.
+droplet_data <- droplet_data %>%
+  rename(
+    code = 'Code',
+    measured = 'Measured?',
+    index = 'Index',
+    valid = 'Valid?',
+    radius_um = 'Radius (um)',
+    voltage = 'Voltage',
+    f_oil = 'Foil',
+    f_emulsion = 'Femulsion',
+    f_inject = 'Finject',
+    grayval = 'GrayVal (A.U.)',
+  )
+
+# This should look better.
+head(droplet_data)
+
+# Add a column with volume of the droplet.
+droplet_data <- droplet_data %>%
+  mutate(
+    volume_pL = (4/3) * pi * radius_um^3 * (1e-3)
+  )
+
+# Now let's see if that worked.
+droplet_data %>%
+  select(radius_um, volume_pL)
+
+# Display to check
+head(droplet_data, 15)
+
+# Filter for valid droplets
+valid_droplet_data <- droplet_data %>%
+  filter(valid == "VALID")
+
+# Find the voltage levels
+voltage_levels <- sort(unique(valid_droplet_data$voltage))
+
+v1 <- voltage_levels[1]
+v2 <- voltage_levels[2]
+
+# Let's map the appropriate pre-junction data to each experiment with a
+# tribble.
+preinjection_mapping <- tribble(
+  ~code, ~preinjection_code,
+  "PICOINJ_4_1", "PICOINJ_4_P1",
+  "PICOINJ_4_2", "PICOINJ_4_P1",
+  "PICOINJ_4_3", "PICOINJ_4_P2",
+  "PICOINJ_4_4", "PICOINJ_4_P2",
+  "PICOINJ_4_5", "PICOINJ_4_P2",
+  "PICOINJ_4_6", "PICOINJ_4_P2",
+  "PICOINJ_4_7", "PICOINJ_4_P2",
+  "PICOINJ_4_8", "PICOINJ_4_P2",
+  "PICOINJ_4_9", "PICOINJ_4_P2",
+  "PICOINJ_4_10", "PICOINJ_4_P2",
+  "PICOINJ_4_11", "PICOINJ_4_P3",
+  "PICOINJ_4_12", "PICOINJ_4_P3",
+  "PICOINJ_4_13", "PICOINJ_4_P3",
+  "PICOINJ_4_14", "PICOINJ_4_P3",
+  "PICOINJ_4_15", "PICOINJ_4_P3",
+  "PICOINJ_4_16", "PICOINJ_4_P3",
+  "PICOINJ_4_17", "PICOINJ_4_P3",
+  "PICOINJ_4_18", "PICOINJ_4_P3",
+  "PICOINJ_4_19", "PICOINJ_4_P4",
+  "PICOINJ_4_20", "PICOINJ_4_P4",
+  "PICOINJ_4_21", "PICOINJ_4_P4",
+  "PICOINJ_4_22", "PICOINJ_4_P4",
+  "PICOINJ_4_23", "PICOINJ_4_P4",
+  "PICOINJ_4_24", "PICOINJ_4_P4",
+  "PICOINJ_4_25", "PICOINJ_4_P4",
+  "PICOINJ_4_26", "PICOINJ_4_P4",
+)
+
+```
+
+# ----- 500V Histogram -----
+
+```{r fig.width=16, fig.height=10}
+# Make a tibble for holding scatterplot data of 500V and match preinjection
+# data correctly. This tibble only contains observations from experimental
+# conditions (post-injections) but has labels for which preinjection is
+# associated with it.
+scatterplot_data_500 <- valid_droplet_data %>%
+  filter(voltage == v1) %>%
+  # Here, we're adding a column (preinjection_code) to scatterplot_data_500,
+  # and the value in each row of that column is taken from the 
+  # preinjection_code column of preinjection_mapping, matched by where 
+  # 'code' from scatterplot_data_500 equals 'code' from preinjection_mapping.
+  # We do not need to add the 'code' column from preinjection_mappings because
+  # code already exists in scatterplot_data.
+  left_join(preinjection_mapping, by = "code") %>%
+  # Now add a new column where every row says post_injection.
+  mutate(data_type = "post_injection")
+
+# Now we make a tibble that contains the preinjection_data.
+preinjection_data <- valid_droplet_data %>%
+  # Filter for valid droplets.
+  filter(valid == "VALID", code %in% preinjection_mapping$preinjection_code) %>%
+  # Label these observations as type pre_injection.
+  mutate(data_type = "pre_injection")
+
+# Create the baseline data WITH the experimental parameters
+baseline_with_params <- scatterplot_data_500 %>%
+  select(f_emulsion, f_inject, preinjection_code) %>%
+  distinct() %>%
+  left_join(preinjection_data, by = c("preinjection_code" = "code")) %>%
+  # Rename the .x columns back to the original names and drop .y columns
+  select(-f_emulsion.y, -f_inject.y) %>%
+  rename(f_emulsion = f_emulsion.x, f_inject = f_inject.x)
+
+# Combine experimental and baseline data
+pre_post_scatterplot <- scatterplot_data_500 %>%
+  bind_rows(baseline_with_params)
+
+# Now plot
+pre_post_scatterplot %>%
+  ggplot(aes(x = radius_um, y = grayval, color = data_type)) +
+  geom_point(alpha = 0.3, size = 1) +
+  scale_color_manual(
+    values = c("pre_injection" = "black", "post_injection" = "red"),
+    name = "Droplet Source"
+  ) +
+  facet_grid(f_emulsion ~ f_inject,
+           labeller = labeller(
+             f_emulsion = as_labeller(
+               function(x) paste0("F[emulsion]: ", x, " * mu * L/hr"),
+               label_parsed
+             ),
+             f_inject = as_labeller(
+               function(x) paste0("F[inject]: ", x, " * mu * L/hr"),
+               label_parsed
+             )
+           )) +
+  labs(
+    title = "Droplet radii vs. lightness at 500V",
+    x = "Droplet Radius (μm)",
+    y = "Droplet Grayval"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "sans", face = "bold"),
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+# ----- 750V Histogram -----
+
+```{r fig.width=16, fig.height=10}
+
+# Make a tibble for holding scatterplot data of 500V and match preinjection
+# data correctly. This tibble only contains observations from experimental
+# conditions (post-injections) but has labels for which preinjection is
+# associated with it.
+scatterplot_data_750 <- valid_droplet_data %>%
+  filter(voltage == v2) %>%
+  # Here, we're adding a column (preinjection_code) to scatterplot_data_500,
+  # and the value in each row of that column is taken from the 
+  # preinjection_code column of preinjection_mapping, matched by where 
+  # 'code' from scatterplot_data_500 equals 'code' from preinjection_mapping.
+  # We do not need to add the 'code' column from preinjection_mappings because
+  # code already exists in scatterplot_data.
+  left_join(preinjection_mapping, by = "code") %>%
+  # Now add a new column where every row says post_injection.
+  mutate(data_type = "post_injection")
+
+# Now we make a tibble that contains the preinjection_data.
+preinjection_data <- valid_droplet_data %>%
+  # Filter for valid droplets.
+  filter(valid == "VALID", code %in% preinjection_mapping$preinjection_code) %>%
+  # Label these observations as type pre_injection.
+  mutate(data_type = "pre_injection")
+
+# Create the baseline data WITH the experimental parameters
+baseline_with_params <- scatterplot_data_500 %>%
+  select(f_emulsion, f_inject, preinjection_code) %>%
+  distinct() %>%
+  left_join(preinjection_data, by = c("preinjection_code" = "code")) %>%
+  # Rename the .x columns back to the original names and drop .y columns
+  select(-f_emulsion.y, -f_inject.y) %>%
+  rename(f_emulsion = f_emulsion.x, f_inject = f_inject.x)
+
+# Combine experimental and baseline data
+pre_post_scatterplot <- scatterplot_data_750 %>%
+  bind_rows(baseline_with_params)
+
+# Now plot
+pre_post_scatterplot %>%
+  ggplot(aes(x = radius_um, y = grayval, color = data_type)) +
+  geom_point(alpha = 0.3, size = 1) +
+  scale_color_manual(
+    values = c("pre_injection" = "black", "post_injection" = "red"),
+    name = "Droplet Source"
+  ) +
+  facet_grid(f_emulsion ~ f_inject,
+           labeller = labeller(
+             f_emulsion = as_labeller(
+               function(x) paste0("F[emulsion]: ", x, " * mu * L/hr"),
+               label_parsed
+             ),
+             f_inject = as_labeller(
+               function(x) paste0("F[inject]: ", x, " * mu * L/hr"),
+               label_parsed
+             )
+           )) +
+  labs(
+    title = "Droplet radii vs. lightness at 750V",
+    x = "Droplet Radius (μm)",
+    y = "Droplet Grayval"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "sans", face = "bold"),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
